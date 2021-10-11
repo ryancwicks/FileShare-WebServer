@@ -1,18 +1,59 @@
 use clap::{Arg, App as ClapApp, value_t};
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{web, Error, App, HttpResponse, HttpServer};
+use std::io::Write;
+use actix_multipart::Multipart;
+use futures_util::TryStreamExt as _;
+use std::path::PathBuf;
+use uuid::Uuid;
+use actix_files::Files;
 
-#[get("/")]
-async fn hello() -> impl Responder {
-    HttpResponse::Ok().body("Hello world!")
+//Global variable, set at runtime but used by multiple threads.
+struct AppState {
+    directory: PathBuf,
 }
 
-#[post("/echo")]
-async fn echo(req_body: String) -> impl Responder {
-    HttpResponse::Ok().body(req_body)
+fn index() -> HttpResponse {
+    let html = r#"<html>
+        <head><title>Upload File</title></head>
+        <body>
+            <form target="/" method="post" enctype="multipart/form-data">
+                <input type="file" multiple name="file"/>
+                <button type="submit">Submit</button>
+            </form>
+        </body>
+    </html>"#;
+
+    HttpResponse::Ok().body(html)
 }
 
-async fn manual_hello() -> impl Responder {
-    HttpResponse::Ok().body("Hey there!")
+async fn save_file(mut payload: Multipart, data: web::Data<AppState>) -> Result<HttpResponse, Error> {
+    // iterate over multipart stream
+    while let Some(mut field) = payload.try_next().await? {
+        // A multipart/form-data stream has to contain `content_disposition`
+        let content_disposition = field
+            .content_disposition()
+            .ok_or_else(|| HttpResponse::BadRequest().finish())?;
+
+        let filename = content_disposition.get_filename().map_or_else(
+            || Uuid::new_v4().to_string(),
+            |f| sanitize_filename::sanitize(f),
+        ); //If a file path is profided, use the sanitized name, otherwise generate a random name.
+        
+        let directory = &data.directory;
+        
+        let filepath = (directory).join(filename);
+
+        // File::create is blocking operation, use threadpool
+        let mut f = web::block(|| std::fs::File::create(filepath)).await?;
+
+        // Field in turn is stream of *Bytes* object
+        while let Some(chunk) = field.try_next().await? {
+            // filesystem operations are blocking, we have to use threadpool
+            f = web::block(move || f.write_all(&chunk).map(|_| f)).await?;
+        }
+    }
+
+    Ok(HttpResponse::Ok().into())
 }
 
 #[actix_web::main]
@@ -41,18 +82,24 @@ async fn main() -> std::io::Result<()> {
         println!("Failed to set output port: {}",e); 
         e.exit();
     });
-    let directory = clap::value_t!(matches, "directory", String).unwrap_or_else(|e| {
+    let temp_directory: String = clap::value_t!(matches, "directory", String).unwrap_or_else(|e| {
         println!("Failed to set directory to serve: {}",e); 
         e.exit();
     });
 
-    println!("Starting file web server \nServing {} on port {}", directory, port);
-   
-    HttpServer::new(|| {
+    println!("Starting file web server \nServing {} on port {}", temp_directory, port);
+    
+    HttpServer::new(move || {
         App::new()
-            .service(hello)
-            .service(echo)
-            .route("/hey", web::get().to(manual_hello))
+            .data(AppState {
+                directory: PathBuf::from(&temp_directory),
+            })
+            .service(
+                web::resource("/")
+                    .route(web::get().to(index))
+                    .route(web::post().to(save_file)),
+            )
+            .service(Files::new("/files", &temp_directory).show_files_listing())
     })
     .bind(("0.0.0.0", port))?
     .run()
