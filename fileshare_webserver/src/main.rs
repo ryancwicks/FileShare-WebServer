@@ -12,14 +12,40 @@ struct AppState {
     directory: PathBuf,
 }
 
-fn index() -> HttpResponse {
+fn upload() -> HttpResponse {
     let html = r#"<html>
         <head><title>Upload File</title></head>
         <body>
-            <form target="/" method="post" enctype="multipart/form-data">
+            <form target="/upload" method="post" enctype="multipart/form-data">
                 <input type="file" multiple name="file"/>
                 <button type="submit">Submit</button>
             </form>
+        </body>
+    </html>"#;
+
+    HttpResponse::Ok().body(html)
+}
+
+
+fn index() -> HttpResponse {
+    let html = r#"<html>
+        <head><title>Simple File Server</title></head>
+        <body>
+            <h1>Simple File Server</h1>
+            <ul>
+            <li><a href="/upload">Upload Files</a></li>
+            <li><a href="/files">Download Files</a></li>
+            </ul>
+
+            <h2>Command line tools:</h2>
+
+            <p>Head to http://<ip address>:<given port>/files to see and download files, or use curl or wget to grab them. To upload, use the following command:</p>
+
+            <p><code>curl -Ffile=@&ltfilename&gt http://&ltip address&gt:&ltport&gt/upload<code></p>
+
+            <p>To download files with wget or curl (add an -O option for Powershell):</p>
+            <p><code>wget http://&ltip address&gt:&ltport&gt/files/&ltfilename&gt</code></br>
+            <code>curl http://&ltip address&gt:&ltport&gt/files/&ltfilename&gt<code></p>
         </body>
     </html>"#;
 
@@ -95,11 +121,15 @@ async fn main() -> std::io::Result<()> {
                 directory: PathBuf::from(&temp_directory),
             })
             .service(
-                web::resource("/")
-                    .route(web::get().to(index))
-                    .route(web::post().to(save_file)),
+                web::resource("/upload")
+                    .route(web::get().to(upload))
+                    .route(web::post().to(save_file))
             )
             .service(Files::new("/files", &temp_directory).show_files_listing())
+            .service(
+                web::resource("/")
+                    .route(web::get().to(index))
+            )
     })
     .bind(("0.0.0.0", port))?
     .run()
